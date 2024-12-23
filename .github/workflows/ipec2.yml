@@ -1,0 +1,69 @@
+name: Deploy to EC2 with Dynamic IP Management
+
+on:
+  push:
+    branches:
+      - main  # Trigger deployment when changes are pushed to the main branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest  # The OS on which the action runs
+
+    steps:
+      # Step 1: Checkout the repository's code
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Step 2: Configure AWS credentials (ensure you have the AWS access keys as GitHub secrets)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1  # Specify your region here
+
+      # Step 3: Get the public IP of the GitHub runner
+      - name: Get GitHub runner public IP
+        id: get_ip
+        run: |
+          echo "GITHUB_RUNNER_PUBLIC_IP=$(curl -s http://checkip.amazonaws.com)" >> $GITHUB_ENV
+
+      # Step 4: Add the GitHub runner IP to the EC2 security group for SSH access
+      - name: Add IP to Security Group
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --region ap-south-1 \
+            --group-id ${{ secrets.EC2_SECURITY_GROUP_ID }} \
+            --protocol tcp \
+            --port 22 \
+            --cidr ${GITHUB_RUNNER_PUBLIC_IP}/32
+
+      # Step 5: Set up SSH for connecting to EC2 instance
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.5.3
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+      # Step 6: Deploy the files to the EC2 instance using rsync
+      - name: Deploy files to EC2
+        run: |
+          # Ensure the remote directory exists and has the correct ownership
+          ssh -o StrictHostKeyChecking=no ubuntu@13.201.39.105 "sudo mkdir -p /var/www/html && sudo chown ubuntu:ubuntu /var/www/html"
+          
+          # Deploy the files (adjust path as necessary)
+          rsync -avz --exclude='.git*' --exclude='node_modules' --delete ./index.php ubuntu@13.201.39.105:/var/www/html/
+
+      # Step 7: Restart Apache to apply changes
+      - name: Restart Apache
+        run: |
+          ssh -o StrictHostKeyChecking=no ubuntu@13.201.39.105 "sudo systemctl restart apache2"
+
+      # Step 8: Remove the GitHub runner IP from the EC2 security group after deployment
+      - name: Remove IP from Security Group
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --region ap-south-1 \
+            --group-id ${{ secrets.EC2_SECURITY_GROUP_ID }} \
+            --protocol tcp \
+            --port 22 \
+            --cidr ${GITHUB_RUNNER_PUBLIC_IP}/32
